@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>Vehicle Motion Cues</title>
+<style>
+  :root { color-scheme: dark; --bg:#0f1115; --card:#181b22; --text:#eef0f4; --muted:#9aa1ad; --accent:#2f6fd6; --ok:#3ecf8e; --warn:#f5b84b; --bad:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; background:var(--bg); color:var(--text);
+         font:16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         padding: max(20px, env(safe-area-inset-top)) 18px max(24px, env(safe-area-inset-bottom)); }
+  h1 { font-size:22px; margin:4px 0 4px; letter-spacing:-.01em; }
+  p { margin:0 0 12px; color:var(--muted); }
+  .card { background:var(--card); border-radius:16px; padding:16px; margin:14px 0; }
+  .status { display:flex; align-items:center; gap:10px; font-weight:600; }
+  .dot { width:12px; height:12px; border-radius:50%; background:var(--muted); flex:none; }
+  .dot.ok { background:var(--ok); }
+  .dot.warn { background:var(--warn); }
+  .dot.bad { background:var(--bad); }
+  button { width:100%; border:0; border-radius:14px; padding:16px; font:600 17px/1 inherit; font-family:inherit;
+           background:var(--accent); color:#fff; margin-top:6px; }
+  button:disabled { opacity:.5; }
+  ol { margin:0; padding-left:20px; color:var(--muted); }
+  li { margin:6px 0; }
+  b { color:var(--text); }
+  .meter { position:relative; width:150px; height:150px; margin:8px auto 4px; border-radius:50%;
+           border:1px solid #2b303b; background:radial-gradient(circle, #1d2129 0 60%, #161920 61%); }
+  .meter::before, .meter::after { content:""; position:absolute; background:#2b303b; }
+  .meter::before { left:50%; top:8px; bottom:8px; width:1px; }
+  .meter::after { top:50%; left:8px; right:8px; height:1px; }
+  .puck { position:absolute; left:50%; top:50%; width:18px; height:18px; margin:-9px; border-radius:50%;
+          background:var(--accent); transition:transform .05s linear; }
+  .small { font-size:13px; color:var(--muted); text-align:center; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+  <h1>Vehicle Motion Cues</h1>
+  <p>Your phone senses the car's motion and your laptop shows matching dots at the screen edges.</p>
+
+  <div class="card">
+    <div class="status"><span id="statusDot" class="dot"></span><span id="statusText">Not started</span></div>
+    <button id="start">Start sending motion</button>
+  </div>
+
+  <div class="card" id="live" hidden>
+    <div class="meter"><div id="puck" class="puck"></div></div>
+    <div class="small" id="rate">—</div>
+  </div>
+
+  <div class="card">
+    <ol>
+      <li><b>Place the phone so it can't slide</b> — cup holder, door pocket or flat on the seat.</li>
+      <li>Either lay it flat with the <b>top pointing to the front of the car</b>, or stand it up with the <b>screen facing you</b>.</li>
+      <li><b>Keep this page open and the screen on.</b> iOS pauses motion data when Safari is in the background or the phone locks.</li>
+      <li>Dots moving the wrong way? Use <b>Direction</b> in the laptop's tray menu.</li>
+    </ol>
+  </div>
+
+  <p class="small">Not for use by the driver.</p>
+
+<script>
+(() => {
+  const key = new URLSearchParams(location.search).get('k') || '';
+  const $ = id => document.getElementById(id);
+  const startBtn = $('start');
+
+  let ws = null, mode = 'ws', wsFailures = 0, connected = false, rejected = false;
+  let queue = [];
+  let up = null;            // from deviceorientation (unambiguous across browsers)
+  let signEstimate = 1;     // +1 if this browser follows the W3C acceleration sign convention
+  let gravityLp = null;     // fallback "up" when there are no orientation events
+  let samples = 0, lastRateCheck = performance.now();
+  let wakeLock = null;
+
+  function setStatus(text, kind) {
+    $('statusText').textContent = text;
+    $('statusDot').className = 'dot' + (kind ? ' ' + kind : '');
+  }
+
+  function upFromOrientation(e) {
+    if (e.beta == null || e.gamma == null) return null;
+    const b = e.beta * Math.PI / 180, g = e.gamma * Math.PI / 180;
+    // World "up" expressed in the device frame for the W3C Z-X'-Y'' rotation order.
+    return [-Math.sin(g) * Math.cos(b), Math.sin(b), Math.cos(g) * Math.cos(b)];
+  }
+
+  function onOrientation(e) { up = upFromOrientation(e) || up; }
+
+  function onMotion(e) {
+    const a = e.acceleration, ag = e.accelerationIncludingGravity;
+    if (!ag || ag.x == null) return;
+
+    let lin;
+    let reaction = [ag.x, ag.y, ag.z];
+    if (a && a.x != null) {
+      lin = [a.x, a.y, a.z];
+      reaction = [ag.x - a.x, ag.y - a.y, ag.z - a.z];
+    } else {
+      gravityLp = gravityLp ? gravityLp.map((v, i) => v + (reaction[i] - v) * 0.05) : reaction.slice();
+      lin = reaction.map((v, i) => v - gravityLp[i]);
+      reaction = gravityLp;
+    }
+
+    // Some WebKit builds report acceleration with the opposite sign. Detect it by comparing the
+    // gravity reaction against the orientation-derived up vector, and fix it here.
+    let u = up;
+    if (u) {
+      const n = Math.hypot(...reaction);
+      if (n > 5) {
+        const d = (reaction[0] * u[0] + reaction[1] * u[1] + reaction[2] * u[2]) / n;
+        signEstimate = Math.max(-1, Math.min(1, signEstimate * 0.98 + Math.sign(d) * 0.02));
+      }
+    } else {
+      u = reaction;
+    }
+    const s = signEstimate < 0 ? -1 : 1;
+    if (!up) u = u.map(v => v * s);
+
+    const r = v => Math.round(v * 1000) / 1000;
+    const sample = [Math.round(e.timeStamp || performance.now()), r(lin[0] * s), r(lin[1] * s), r(lin[2] * s), r(u[0]), r(u[1]), r(u[2])];
+
+    samples++;
+    showPuck(sample);
+    if (mode === 'ws') {
+      if (ws && ws.readyState === 1 && ws.bufferedAmount < 64 * 1024) ws.send(JSON.stringify(sample));
+    } else {
+      queue.push(sample);
+      if (queue.length > 120) queue.shift();
+    }
+  }
+
+  function showPuck(sample) {
+    // Rough on-phone preview: horizontal acceleration, phone frame, clipped.
+    const px = Math.max(-60, Math.min(60, -sample[1] * 18));
+    const py = Math.max(-60, Math.min(60, sample[2] * 18));
+    $('puck').style.transform = `translate(${px}px, ${py}px)`;
+    const now = performance.now();
+    if (now - lastRateCheck > 1000) {
+      $('rate').textContent = `${Math.round(samples * 1000 / (now - lastRateCheck))} samples/s · ${mode === 'ws' ? 'WebSocket' : 'HTTPS'}`;
+      samples = 0; lastRateCheck = now;
+    }
+  }
+
+  function connectWs() {
+    let opened = false;
+    try {
+      ws = new WebSocket(`wss://${location.host}/ws?k=${encodeURIComponent(key)}`);
+    } catch { ws = null; return fallBackToPost(); }
+    ws.onopen = () => { opened = true; wsFailures = 0; connected = true; setStatus('Connected — sending motion', 'ok'); };
+    ws.onclose = () => {
+      ws = null; connected = false;
+      if (!opened && ++wsFailures >= 2) return fallBackToPost();
+      setStatus('Reconnecting…', 'warn');
+      setTimeout(connectWs, 1000);
+    };
+    ws.onerror = () => {};
+  }
+
+  function fallBackToPost() {
+    mode = 'post';
+    setStatus('Connecting…', 'warn');
+    setInterval(flushPost, 100);
+  }
+
+  let posting = false;
+  async function flushPost() {
+    if (posting || !queue.length || rejected) return;
+    posting = true;
+    const batch = queue; queue = [];
+    try {
+      const res = await fetch(`/m?k=${encodeURIComponent(key)}`, { method: 'POST', body: JSON.stringify(batch), headers: { 'Content-Type': 'application/json' }, cache: 'no-store' });
+      if (res.status === 403) { rejected = true; setStatus('Pairing key rejected — rescan the QR code on the laptop', 'bad'); }
+      else if (res.ok) { connected = true; setStatus('Connected — sending motion', 'ok'); }
+    } catch {
+      connected = false; setStatus('Laptop unreachable — same Wi-Fi or hotspot?', 'bad');
+    } finally { posting = false; }
+  }
+
+  async function requestWakeLock() {
+    try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') requestWakeLock();
+  });
+
+  startBtn.addEventListener('click', async () => {
+    if (!window.isSecureContext) { setStatus('Open this page with https://', 'bad'); return; }
+    if (!key) { setStatus('Missing pairing key — scan the QR code on the laptop', 'bad'); return; }
+    startBtn.disabled = true;
+    try {
+      // Both prompts must start inside the tap handler, so request them together.
+      const asks = [];
+      if (typeof DeviceMotionEvent !== 'undefined' && DeviceMotionEvent.requestPermission) asks.push(DeviceMotionEvent.requestPermission());
+      if (typeof DeviceOrientationEvent !== 'undefined' && DeviceOrientationEvent.requestPermission) asks.push(DeviceOrientationEvent.requestPermission().catch(() => 'denied'));
+      const answers = await Promise.all(asks);
+      if (answers.length && answers[0] !== 'granted') throw new Error('denied');
+    } catch {
+      startBtn.disabled = false;
+      setStatus('Motion access denied. Settings › Apps › Safari › Motion & Orientation Access, then reload.', 'bad');
+      return;
+    }
+    window.addEventListener('deviceorientation', onOrientation);
+    window.addEventListener('devicemotion', onMotion);
+    requestWakeLock();
+    $('live').hidden = false;
+    startBtn.textContent = 'Sending…';
+    setStatus('Connecting…', 'warn');
+    connectWs();
+  });
+})();
+</script>
+</body>
+</html>

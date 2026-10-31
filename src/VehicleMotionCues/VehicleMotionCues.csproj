@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Windows is the primary target and gets the WinRT projection (laptop accelerometer support).
+    macOS builds pass -p:VmcTarget=mac to drop the Windows-only TFM.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework Condition="'$(VmcTarget)' != 'mac'">net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetFramework Condition="'$(VmcTarget)' == 'mac'">net8.0</TargetFramework>
+    <SupportedOSPlatformVersion Condition="'$(VmcTarget)' != 'mac'">10.0.17763.0</SupportedOSPlatformVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>VehicleMotionCues</AssemblyName>
+    <RootNamespace>VehicleMotionCues</RootNamespace>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <Version>0.1.0</Version>
+    <Product>Vehicle Motion Cues</Product>
+    <Authors>Francisco Olpindo IV</Authors>
+    <Description>Animated edge dots that match vehicle motion to reduce motion sickness while using a laptop as a passenger.</Description>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.22" />
+    <PackageReference Include="QRCoder" Version="1.8.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\phone.html" LogicalName="phone.html" />
+    <AvaloniaResource Include="Assets\icon.png" />
+  </ItemGroup>
+
+</Project>
